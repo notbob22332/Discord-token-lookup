@@ -1,0 +1,366 @@
+import json
+import time
+import datetime
+import urllib.request
+import urllib.error
+import tkinter as tk
+from tkinter import simpledialog, scrolledtext
+
+BASE_URL = "https://discord.com/api/v9"
+
+# Constants for DonutSMP server and roles
+DONUT_SMP_GUILD_ID = "299949507989340160"
+DONUT_SMP_ROLE_IDS = {
+    "1414553890501824512",
+    "1003042333702504520",
+    "1003043620045193276",
+}
+
+
+def api_get(path, token):
+    req = urllib.request.Request(
+        BASE_URL + path,
+        headers={
+            "Authorization": token,
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def try_api_get(path, token):
+    try:
+        return api_get(path, token)
+    except Exception:
+        return None
+
+
+def snowflake_to_datetime(snowflake):
+    try:
+        timestamp_ms = (int(snowflake) >> 22) + 1420070400000
+        return datetime.datetime.fromtimestamp(timestamp_ms / 1000, tz=datetime.timezone.utc)
+    except Exception:
+        return None
+
+
+def get_badges(flags, premium_type):
+    badges = []
+    badge_map = {
+        1 << 0: "Discord Staff",
+        1 << 1: "Partnered Server Owner",
+        1 << 2: "HypeSquad Events",
+        1 << 3: "Bug Hunter Level 1",
+        1 << 6: "House Bravery",
+        1 << 7: "House Brilliance",
+        1 << 8: "House Balance",
+        1 << 9: "Early Supporter",
+        1 << 10: "Team User",
+        1 << 14: "Bug Hunter Level 2",
+        1 << 16: "Verified Bot Developer",
+        1 << 17: "Active Developer",
+    }
+    for bit, name in badge_map.items():
+        if flags & bit:
+            badges.append(name)
+
+    if premium_type == 1:
+        badges.append("Nitro Classic")
+    elif premium_type == 2:
+        badges.append("Nitro")
+    elif premium_type == 3:
+        badges.append("Nitro Basic")
+
+    return badges if badges else ["None"]
+
+
+def get_guild_member_count(guild_id, token):
+    for endpoint in (f"/guilds/{guild_id}/preview", f"/guilds/{guild_id}"):
+        try:
+            data = api_get(endpoint, token)
+            count = data.get("approximate_member_count")
+            if count is not None:
+                return count
+        except Exception:
+            continue
+    return None
+
+
+def get_premium_type_name(premium_type):
+    return {
+        0: "None",
+        1: "Nitro Classic",
+        2: "Nitro",
+        3: "Nitro Basic",
+    }.get(premium_type, "Unknown")
+
+
+def get_boost_allowance(premium_type):
+    """
+    Approximate boost allowance based on Nitro type.
+    Nitro Classic = 1 boost, Nitro = 2 boosts, Nitro Basic = 1 boost.
+    """
+    return {
+        0: 0,
+        1: 1,
+        2: 2,
+        3: 1,
+    }.get(premium_type, 0)
+
+
+def get_nitro_subscription_status(token):
+    data = try_api_get("/users/@me/billing/subscriptions", token)
+    if not data:
+        return None
+    if isinstance(data, list):
+        active_subs = []
+        for sub in data:
+            plan = sub.get("plan", {})
+            plan_name = plan.get("name") or sub.get("plan_id") or "Unknown Plan"
+            status = sub.get("status")
+            if status in (1, "active", "Active"):
+                active_subs.append(plan_name)
+        if active_subs:
+            return ", ".join(active_subs) + " (Active)"
+        if data:
+            return "Subscription data present, status unknown"
+    return None
+
+
+def get_boosted_guilds(token):
+    data = try_api_get("/users/@me/guilds/premium", token)
+    if isinstance(data, list):
+        return data
+    return []
+
+
+def check_donut_smp(user_id, token):
+    """
+    Checks if the user is in DonutSMP, has any of the specified roles,
+    and if they have a nickname in that server.
+    Returns a list of strings to append to the result.
+    """
+    lines = []
+    member_path = f"/guilds/{DONUT_SMP_GUILD_ID}/members/{user_id}"
+    member_data = None
+    in_guild = False
+
+    try:
+        member_data = api_get(member_path, token)
+        in_guild = True
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            in_guild = False
+        else:
+            # Unknown error, treat as not in guild but note it
+            in_guild = False
+            lines.append(f"DonutSMP check error: HTTP {e.code}")
+    except Exception as ex:
+        in_guild = False
+        lines.append(f"DonutSMP check error: {ex}")
+
+    lines.append(f"In DonutSMP: {in_guild}")
+
+    if in_guild and member_data:
+        # Check roles
+        roles = set(member_data.get("roles", []))
+        has_verified_role = bool(roles & DONUT_SMP_ROLE_IDS)
+        lines.append(f"verified in DonutSMP: {has_verified_role}")
+
+        # Check nickname
+        nick = member_data.get("nick")
+        if nick:
+            lines.append(f"account linked: {nick}")
+    elif not in_guild:
+        # Not in guild, so verified false and no nickname
+        lines.append("verified in DonutSMP: false")
+        # No "account linked" line because they have no nickname if not in server
+
+    return lines
+
+
+def scan_token(token):
+    result_lines = []
+
+    # --- User profile ---
+    try:
+        user = api_get("/users/@me", token)
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            return "Authorization failed: invalid token or insufficient permissions."
+        return f"HTTP error {e.code} while fetching user profile."
+    except Exception as ex:
+        return f"Request failed while fetching user profile: {ex}"
+
+    user_id = user.get("id", "N/A")
+    username = user.get("username", "Unknown")
+    discriminator = user.get("discriminator", "0")
+    global_name = user.get("global_name")
+    email = user.get("email")
+    phone = user.get("phone")
+    locale = user.get("locale")
+    mfa_enabled = user.get("mfa_enabled")
+    verified = user.get("verified")
+    flags = user.get("flags", 0) or user.get("public_flags", 0)
+    premium_type = user.get("premium_type", 0)
+    created_dt = snowflake_to_datetime(user_id)
+
+    result_lines.append("=== Discord Account Information ===")
+    if discriminator and discriminator != "0":
+        result_lines.append(f"Username: {username}#{discriminator}")
+    else:
+        result_lines.append(f"Username: {username}")
+
+    if global_name:
+        result_lines.append(f"Display Name: {global_name}")
+
+    result_lines.append(f"User ID: {user_id}")
+
+    if created_dt:
+        result_lines.append(
+            f"Account Created: {created_dt.astimezone().strftime('%Y-%m-%d %H:%M:%S %Z')} "
+            f"(UTC: {created_dt.strftime('%Y-%m-%d %H:%M:%S')})"
+        )
+    else:
+        result_lines.append("Account Created: N/A")
+
+    if email:
+        result_lines.append(f"Email: {email}")
+    if phone:
+        result_lines.append(f"Phone: {phone}")
+    if locale:
+        result_lines.append(f"Locale: {locale}")
+
+    result_lines.append(f"MFA Enabled: {mfa_enabled}")
+    result_lines.append(f"Verified: {verified}")
+    badges = get_badges(flags, premium_type)
+    result_lines.append(f"Badges: {', '.join(badges)}")
+    result_lines.append("")
+
+    # --- DonutSMP Check ---
+    result_lines.append("=== DonutSMP Server Check ===")
+    donut_lines = check_donut_smp(user_id, token)
+    result_lines.extend(donut_lines)
+    result_lines.append("")
+
+    # --- Nitro information ---
+    result_lines.append("=== Nitro Information ===")
+    premium_name = get_premium_type_name(premium_type)
+    result_lines.append(f"Nitro Type: {premium_name}")
+
+    boost_allowance = get_boost_allowance(premium_type)
+    result_lines.append(f"Boost Allowance: {boost_allowance} boost(s)")
+
+    sub_status = get_nitro_subscription_status(token)
+    if sub_status:
+        result_lines.append(f"Subscription Status: {sub_status}")
+    else:
+        result_lines.append("Subscription Status: Unavailable (premium_type used instead)")
+    result_lines.append("")
+
+    # --- Boosts ---
+    boosted_guilds = get_boosted_guilds(token)
+    result_lines.append(f"=== Boosted Servers ({len(boosted_guilds)}) ===")
+    result_lines.append(f"Total Active Boosts: {len(boosted_guilds)}")
+    unused = max(0, boost_allowance - len(boosted_guilds))
+    result_lines.append(f"Unused Boosts: {unused}")
+    result_lines.append("")
+
+    if boosted_guilds:
+        for i, bg in enumerate(boosted_guilds, 1):
+            bg_id = bg.get("id", "N/A")
+            bg_name = bg.get("name", "Unknown")
+            member_count = bg.get("approximate_member_count")
+            if member_count is None:
+                member_count = get_guild_member_count(bg_id, token)
+            member_str = f"{member_count:,}" if member_count is not None else "Unavailable"
+            result_lines.append(f"{i}. {bg_name} (ID: {bg_id}) - Members: {member_str}")
+            time.sleep(0.3)
+    else:
+        result_lines.append("No boosted servers found.")
+    result_lines.append("")
+
+    # --- Fetch guilds ---
+    try:
+        guilds = api_get("/users/@me/guilds", token)
+    except urllib.error.HTTPError as e:
+        return "\n".join(result_lines) + f"\nHTTP error {e.code} while fetching guilds."
+    except Exception as ex:
+        return "\n".join(result_lines) + f"\nRequest failed while fetching guilds: {ex}"
+
+    owned_guilds = []
+    admin_guilds = []
+    for g in guilds:
+        perms = int(g.get("permissions", 0) or 0)
+        is_owner = g.get("owner") is True
+        if is_owner:
+            owned_guilds.append(g)
+        if is_owner or (perms & 0x8):
+            admin_guilds.append(g)
+
+    # --- Owned servers ---
+    result_lines.append(f"=== Owned Servers ({len(owned_guilds)}) ===")
+    if owned_guilds:
+        for i, g in enumerate(owned_guilds, 1):
+            gid = g.get("id", "N/A")
+            gname = g.get("name", "Unknown")
+            member_count = get_guild_member_count(gid, token)
+            member_str = f"{member_count:,}" if member_count is not None else "Unavailable"
+            result_lines.append(f"{i}. {gname} (ID: {gid}) - Members: {member_str}")
+            time.sleep(0.4)
+    else:
+        result_lines.append("No owned servers found.")
+    result_lines.append("")
+
+    # --- Administrator servers ---
+    result_lines.append(f"=== Administrator Servers ({len(admin_guilds)}) ===")
+    if admin_guilds:
+        for i, g in enumerate(admin_guilds, 1):
+            gid = g.get("id", "N/A")
+            gname = g.get("name", "Unknown")
+            is_owner = g.get("owner") is True
+            member_count = get_guild_member_count(gid, token)
+            member_str = f"{member_count:,}" if member_count is not None else "Unavailable"
+            owner_tag = " [Owner]" if is_owner else ""
+            result_lines.append(f"{i}. {gname} (ID: {gid}) - Members: {member_str}{owner_tag}")
+            time.sleep(0.4)
+    else:
+        result_lines.append("No administrator servers found.")
+
+    return "\n".join(result_lines)
+
+
+def main():
+    root = tk.Tk()
+    root.withdraw()
+
+    token = simpledialog.askstring(
+        "Discord Token Scanner",
+        "Paste the Discord token:",
+        parent=root,
+        show="*",
+    )
+
+    if not token:
+        root.destroy()
+        return
+
+    token = token.strip()
+    output = scan_token(token)
+
+    win = tk.Toplevel(root)
+    win.title("Discord Token Scan Results")
+    win.geometry("950x700")
+
+    text_area = scrolledtext.ScrolledText(win, wrap=tk.WORD, font=("Consolas", 10))
+    text_area.pack(fill=tk.BOTH, expand=True)
+    text_area.insert(tk.END, output)
+    text_area.configure(state=tk.DISABLED)
+
+    win.protocol("WM_DELETE_WINDOW", root.destroy)
+    win.lift()
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()
